@@ -44,18 +44,39 @@ class StockController {
     const { status } = req.query;
 
     try {
-      let query = 'SELECT * FROM stock_items WHERE product_id = ?';
+      let query = `
+        SELECT 
+          si.*,
+          p.customer_email as sold_to,
+          p.customer_name,
+          p.external_id as transaction_id,
+          p.completed_at as sale_date
+        FROM stock_items si
+        LEFT JOIN payments p ON p.id = si.payment_id
+        WHERE si.product_id = ?
+      `;
+      
       const params = [product_id];
 
       if (status) {
-        query += ' AND status = ?';
+        query += ' AND si.status = ?';
         params.push(status);
       }
 
-      query += ' ORDER BY created_at DESC';
+      query += ' ORDER BY si.created_at DESC';
 
       const [items] = await db.query(query, params);
-      res.json(items);
+      
+      // Formatar os dados
+      const formattedItems = items.map(item => ({
+        ...item,
+        sold_to: item.sold_to || '-',
+        customer_name: item.customer_name || '-',
+        transaction_id: item.transaction_id || '-',
+        sale_date: item.sale_date ? new Date(item.sale_date).toLocaleString() : '-'
+      }));
+
+      res.json(formattedItems);
     } catch (error) {
       console.error('Erro ao listar itens:', error);
       res.status(500).json({ error: 'Erro ao listar itens do estoque' });

@@ -9,6 +9,7 @@ class ProductController {
       let query = `
         SELECT 
           p.*,
+          p.sold as sold,
           COUNT(DISTINCT si.id) as total_stock,
           COUNT(DISTINCT CASE WHEN si.status = 'AVAILABLE' THEN si.id END) as available_stock,
           COUNT(DISTINCT CASE WHEN si.status = 'SOLD' THEN si.id END) as sold_count,
@@ -36,7 +37,7 @@ class ProductController {
         ...product,
         stock: parseInt(product.available_stock || 0),
         available_stock: parseInt(product.available_stock || 0),
-        sold: parseInt(product.sold_count || 0),
+        sold: parseInt(product.sold || 0),
         status: parseInt(product.available_stock || 0) > 0 ? 'DISPONÍVEL' : 'ESGOTADO',
         available_codes: product.available_codes ? product.available_codes.split(',') : []
       }));
@@ -55,17 +56,46 @@ class ProductController {
       name, 
       price, 
       old_price,
-      description
+      description,
+      video_url,
+      sold
     } = req.body;
+
+    console.log('Dados recebidos:', {
+      id,
+      category_id,
+      name,
+      price,
+      old_price,
+      description,
+      video_url,
+      sold
+    });
 
     let image = null;
     
     try {
+      // Validação dos campos obrigatórios
+      if (!category_id) {
+        console.log('Categoria não fornecida');
+        return res.status(400).json({ error: 'Categoria é obrigatória' });
+      }
+
+      if (!name || !price) {
+        return res.status(400).json({ error: 'Nome e preço são obrigatórios' });
+      }
+
       await db.query('START TRANSACTION');
 
       const [existing] = await db.query('SELECT id FROM products WHERE id = ?', [id]);
       if (existing.length > 0) {
         return res.status(400).json({ error: 'ID já está em uso. Escolha outro ID.' });
+      }
+
+      // Validar se a categoria existe
+      const [categoryExists] = await db.query('SELECT id FROM categories WHERE id = ?', [category_id]);
+      if (categoryExists.length === 0) {
+        return res.status(400).json({ error: 'Categoria não encontrada' });
       }
 
       if (req.file) {
@@ -76,13 +106,24 @@ class ProductController {
 
       const formattedPrice = parseFloat(price);
       const formattedOldPrice = old_price ? parseFloat(old_price) : null;
+      const formattedSold = sold ? parseInt(sold) : 0;
 
       await db.query(
         `INSERT INTO products (
           id, category_id, name, price, old_price, 
-          description, image, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, NOW())`,
-        [id, category_id, name, formattedPrice, formattedOldPrice, description, image]
+          description, image, video_url, sold, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+        [
+          id, 
+          category_id, 
+          name, 
+          formattedPrice, 
+          formattedOldPrice, 
+          description, 
+          image,
+          video_url || '',
+          formattedSold
+        ]
       );
 
       await db.query('COMMIT');
@@ -99,7 +140,7 @@ class ProductController {
       const product = {
         ...newProduct[0],
         stock: 0,
-        sold: 0,
+        sold: formattedSold,
         status: 'ESGOTADO'
       };
 
@@ -154,25 +195,31 @@ class ProductController {
         updateData.image = null;
       }
 
-      const cleanData = {
+      const formattedPrice = parseFloat(updateData.price);
+      const formattedOldPrice = updateData.old_price ? parseFloat(updateData.old_price) : null;
+      const formattedSold = parseInt(updateData.sold) || 0;
+
+      const updates = {
         name: updateData.name,
-        price: parseFloat(updateData.price),
-        old_price: updateData.old_price ? parseFloat(updateData.old_price) : null,
+        price: formattedPrice,
+        old_price: formattedOldPrice,
         description: updateData.description,
         category_id: parseInt(updateData.category_id),
-        image: updateData.image
+        image: updateData.image,
+        video_url: updateData.video_url,
+        sold: formattedSold
       };
 
-      Object.keys(cleanData).forEach(key => {
-        if (cleanData[key] === undefined || cleanData[key] === null) {
-          delete cleanData[key];
+      Object.keys(updates).forEach(key => {
+        if (updates[key] === undefined || updates[key] === null) {
+          delete updates[key];
         }
       });
 
-      console.log('Dados para atualização:', cleanData);
+      console.log('Dados para atualização:', updates);
 
       const updateQuery = 'UPDATE products SET ? WHERE id = ?';
-      await db.query(updateQuery, [cleanData, id]);
+      await db.query(updateQuery, [updates, id]);
 
       await db.query('COMMIT');
       
@@ -231,44 +278,40 @@ class ProductController {
   }
 
   async getById(req, res) {
-    const { id } = req.params;
-
     try {
-      const [products] = await db.query(`
-        SELECT 
-          p.*,
-          COUNT(DISTINCT si.id) as total_stock,
-          COUNT(DISTINCT CASE WHEN si.status = 'AVAILABLE' THEN si.id END) as available_stock,
-          COUNT(DISTINCT CASE WHEN si.status = 'SOLD' THEN si.id END) as sold_count,
-          JSON_ARRAYAGG(
-            CASE WHEN si.status = 'AVAILABLE' 
-            THEN JSON_OBJECT('id', si.id, 'code', si.code) 
-            END
-          ) as stock_items
-        FROM products p
-        LEFT JOIN stock_items si ON p.id = si.product_id
-        WHERE p.id = ?
-        GROUP BY p.id
-      `, [id]);
+      const { id } = req.params;
+      // Remover qualquer texto e manter apenas os números
+      const productId = id.replace(/\D/g, '');
+      
+      const [product] = await db.query(
+        `SELECT 
+          p.*, 
+          c.name as category_name,
+          p.sold as sold_count,
+          (SELECT COUNT(*) FROM stock_items si 
+           WHERE si.product_id = p.id AND si.status = 'AVAILABLE') as available_stock
+         FROM products p
+         LEFT JOIN categories c ON c.id = p.category_id
+         WHERE p.id = ?`,
+        [productId]
+      );
 
-      if (products.length === 0) {
-        return res.status(404).json({ error: 'Produto não encontrado' });
+      if (!product || product.length === 0) {
+        return res.status(404).json({ message: 'Produto não encontrado' });
       }
 
-      const product = products[0];
-      
-      product.stock_items = JSON.parse(product.stock_items || '[]')
-        .filter(item => item !== null);
+      // Formatar o produto antes de retornar
+      const formattedProduct = {
+        ...product[0],
+        sold: parseInt(product[0].sold_count || 0),
+        stock: parseInt(product[0].available_stock || 0),
+        status: parseInt(product[0].available_stock || 0) > 0 ? 'DISPONÍVEL' : 'ESGOTADO'
+      };
 
-      product.stock = parseInt(product.available_stock || 0);
-      product.available_stock = parseInt(product.available_stock || 0);
-      product.sold = parseInt(product.sold_count || 0);
-      product.status = product.available_stock > 0 ? 'DISPONÍVEL' : 'ESGOTADO';
-
-      res.json(product);
+      res.json(formattedProduct);
     } catch (error) {
       console.error('Erro ao buscar produto:', error);
-      res.status(500).json({ error: 'Erro ao buscar produto' });
+      res.status(500).json({ message: 'Erro ao buscar produto' });
     }
   }
 
